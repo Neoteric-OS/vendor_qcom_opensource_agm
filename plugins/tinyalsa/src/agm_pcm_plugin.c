@@ -1,6 +1,6 @@
 /*
 ** Copyright (c) 2019, 2021 The Linux Foundation. All rights reserved.
-** Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+** Copyright (c) 2022, 2023 Qualcomm Innovation Center, Inc. All rights reserved.
 **
 ** Redistribution and use in source and binary forms, with or without
 ** modification, are permitted provided that the following conditions are
@@ -42,7 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <tinyalsa/pcm_plugin.h>
+#include <tinyalsa/plugin.h>
 #include <snd-card-def.h>
 #include <tinyalsa/asoundlib.h>
 #include <agm/utils.h>
@@ -75,11 +75,12 @@ struct pcm_plugin_pos_buf_info {
     unsigned int boundary;       /* pcm boundary */
     snd_pcm_uframes_t hw_ptr;    /* RO: hw ptr (0...boundary-1) */
     snd_pcm_uframes_t hw_ptr_base;
+    unsigned int crossed_boundary_cnt;
     struct timespec tstamp;
     snd_pcm_uframes_t appl_ptr;  /* RW: appl ptr (0...boundary-1) */
-    snd_pcm_uframes_t avail_min; /* RW: min available frames for wakeup */
     uint32_t wall_clk_msw;
     uint32_t wall_clk_lsw;
+    uint32_t frame_counter;
 };
 
 struct agm_mmap_buffer_port {
@@ -95,7 +96,9 @@ struct agm_pcm_priv {
     struct pcm_plugin_pos_buf_info *pos_buf;
     uint64_t handle;
     void *card_node;
+    void *dev_node;
     int session_id;
+    snd_pcm_uframes_t avail_min; /* RW: min available frames for wakeup */
     unsigned int period_size;
     snd_pcm_uframes_t total_size_frames;
     /* idx: 0: out port, 1: in port */
@@ -255,16 +258,7 @@ static void agm_pcm_plugin_apply_appl_ptr(struct agm_pcm_priv *priv,
 static void agm_pcm_plugin_apply_avail_min(struct agm_pcm_priv *priv,
         snd_pcm_uframes_t avail_min)
 {
-    struct pcm_plugin_pos_buf_info *pos = priv->pos_buf;
-
-    pos->avail_min = avail_min;
-}
-
-static snd_pcm_uframes_t agm_pcm_plugin_get_avail_min(struct agm_pcm_priv *priv)
-{
-    struct pcm_plugin_pos_buf_info *pos = priv->pos_buf;
-
-    return pos->avail_min;
+    priv->avail_min = avail_min;
 }
 
 static snd_pcm_uframes_t agm_pcm_plugin_get_appl_ptr(struct agm_pcm_priv *priv)
@@ -304,6 +298,7 @@ static int agm_pcm_plugin_get_shared_pos(struct pcm_plugin_pos_buf_info *pos_buf
         if (frame_cnt1 != frame_cnt2)
             continue;
 
+        pos_buf->frame_counter = frame_cnt1;
         return 0;
     }
 
@@ -318,9 +313,11 @@ static int agm_pcm_plugin_update_hw_ptr(struct agm_pcm_priv *priv)
     uint32_t read_index, wall_clk_msw, wall_clk_lsw;
     int64_t delta_wall_clk_us = 0;
     uint32_t delta_wall_clk_frames = 0;
+    uint64_t sub_res = 0;
     int ret = 0;
     uint32_t period_size = priv->period_size; /** in frames */
     uint32_t crossed_boundary = 0;
+    uint32_t old_frame_counter = priv->pos_buf->frame_counter;
 
     do {
         ret = agm_pcm_plugin_get_shared_pos(priv->pos_buf,
@@ -332,16 +329,21 @@ static int agm_pcm_plugin_update_hw_ptr(struct agm_pcm_priv *priv)
         pos = (circ_buf_pos / period_size) * period_size;
         old_hw_ptr = agm_pcm_plugin_get_hw_ptr(priv);
         hw_base = priv->pos_buf->hw_ptr_base;
-        new_hw_ptr = hw_base + pos;
+
+        // Update new_hw_ptr
+        __builtin_uaddl_overflow(hw_base, pos, &new_hw_ptr);
+        __builtin_uaddl_overflow(new_hw_ptr,
+            priv->pos_buf->boundary * priv->pos_buf->crossed_boundary_cnt, &new_hw_ptr);
 
         // Set delta_wall_clk_us only if cached wall clk is non-zero
         if (priv->pos_buf->wall_clk_msw || priv->pos_buf->wall_clk_lsw) {
             uint64_t dsp_wall_clk =  (((uint64_t)wall_clk_msw) << 32 | wall_clk_lsw);
             uint64_t cached_wall_clk = (((uint64_t)priv->pos_buf->wall_clk_msw) << 32 |
                                          priv->pos_buf->wall_clk_lsw);
-            //Compute delta only if diff is greater than zero
+            // Compute delta only if diff is greater than zero
             if (dsp_wall_clk > cached_wall_clk) {
-                delta_wall_clk_us = (int64_t)(dsp_wall_clk - cached_wall_clk);
+                __builtin_usubl_overflow(dsp_wall_clk,cached_wall_clk,&sub_res);
+                delta_wall_clk_us = (int64_t)sub_res;
             }
         }
         // Identify the number of times of shared buffer length that the
@@ -359,9 +361,13 @@ static int agm_pcm_plugin_update_hw_ptr(struct agm_pcm_priv *priv)
         // has crossed old_hw_ptr atleast once if not more
         if (crossed_boundary > 0) {
             hw_base += (crossed_boundary * priv->total_size_frames);
-            if (hw_base >= priv->pos_buf->boundary)
+            if (hw_base >= priv->pos_buf->boundary) {
+                priv->pos_buf->crossed_boundary_cnt += hw_base / priv->pos_buf->boundary;
                 hw_base = 0;
-            new_hw_ptr = hw_base + pos;
+            }
+            __builtin_uaddl_overflow(hw_base, pos, &new_hw_ptr);
+            __builtin_uaddl_overflow(new_hw_ptr,
+                priv->pos_buf->boundary * priv->pos_buf->crossed_boundary_cnt, &new_hw_ptr);
             priv->pos_buf->hw_ptr_base = hw_base;
             AGM_LOGD("%s: crossed_boundary = %u, new_hw_ptr=%ld \n",
                                                 __func__, crossed_boundary, new_hw_ptr);
@@ -372,16 +378,23 @@ static int agm_pcm_plugin_update_hw_ptr(struct agm_pcm_priv *priv)
         } else {
             if (new_hw_ptr < old_hw_ptr) {
                 hw_base += priv->total_size_frames;
-                if (hw_base >= priv->pos_buf->boundary)
+                if (hw_base >= priv->pos_buf->boundary) {
                     hw_base = 0;
-                new_hw_ptr = hw_base + pos;
+                    priv->pos_buf->crossed_boundary_cnt += 1;
+                }
+                __builtin_uaddl_overflow(hw_base, pos, &new_hw_ptr);
+                __builtin_uaddl_overflow(new_hw_ptr,
+                    priv->pos_buf->boundary * priv->pos_buf->crossed_boundary_cnt, &new_hw_ptr);
                 priv->pos_buf->hw_ptr_base = hw_base;
             }
         }
 
         priv->pos_buf->hw_ptr = new_hw_ptr;
-        priv->pos_buf->wall_clk_lsw = wall_clk_lsw;
-        priv->pos_buf->wall_clk_msw = wall_clk_msw;
+        // cache wall clk only when there's data update in shared buffer
+        if (priv->pos_buf->frame_counter != old_frame_counter) {
+            priv->pos_buf->wall_clk_lsw = wall_clk_lsw;
+            priv->pos_buf->wall_clk_msw = wall_clk_msw;
+        }
         clock_gettime(CLOCK_MONOTONIC, &priv->pos_buf->tstamp);
     }
 
@@ -429,6 +442,7 @@ static int agm_pcm_plugin_reset(struct pcm_plugin *plugin)
     priv->pos_buf->hw_ptr_base = 0;
     priv->pos_buf->wall_clk_msw = 0;
     priv->pos_buf->wall_clk_lsw = 0;
+    priv->pos_buf->crossed_boundary_cnt = 0;
     AGM_LOGD("%s: reset hw_ptr to %d \n", __func__, priv->pos_buf->hw_ptr);
     return ret;
 }
@@ -464,7 +478,7 @@ static int agm_pcm_hw_params(struct pcm_plugin *plugin,
     priv->total_size_frames = buffer_config->count *
             priv->period_size; /* in frames */
 
-    snd_card_def_get_int(plugin->node, "session_mode", &sess_mode);
+    snd_card_def_get_int(priv->dev_node, "session_mode", &sess_mode);
     session_config->dir = (plugin->mode & PCM_IN) ? TX : RX;
     session_config->sess_mode = sess_mode;
     AGM_LOGD("%s: mode: %d\n", __func__, plugin->mode);
@@ -488,9 +502,11 @@ static int agm_pcm_sw_params(struct pcm_plugin *plugin,
     if (ret)
         return ret;
 
+    priv->avail_min = sparams->avail_min;
+
     session_config = priv->session_config;
 
-    snd_card_def_get_int(plugin->node, "session_mode", &sess_mode);
+    snd_card_def_get_int(priv->dev_node, "session_mode", &sess_mode);
 
     session_config->dir = (plugin->mode & PCM_IN) ? TX : RX;
     session_config->sess_mode = sess_mode;
@@ -510,7 +526,7 @@ static int agm_pcm_sync_ptr(struct pcm_plugin *plugin,
     int ret = 0;
 
     if (!(plugin->mode & PCM_NOIRQ))
-        return -EOPNOTSUPP;
+        return 0;
 
     ret = agm_get_session_handle(priv, &handle);
     if (ret)
@@ -535,7 +551,7 @@ static int agm_pcm_sync_ptr(struct pcm_plugin *plugin,
     if (!(sync_ptr->flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN)) {
         agm_pcm_plugin_apply_avail_min(priv, sync_ptr->c.control.avail_min);
     } else {
-        sync_ptr->c.control.avail_min = agm_pcm_plugin_get_avail_min(priv);
+        sync_ptr->c.control.avail_min = priv->avail_min;
     }
 
     sync_ptr->s.status.hw_ptr = agm_pcm_plugin_get_hw_ptr(priv);
@@ -561,6 +577,9 @@ static int agm_pcm_writei_frames(struct pcm_plugin *plugin, struct snd_xferi *x)
             agm_format_to_bits(priv->media_config->format) / 8);
 
     ret = agm_session_write(handle, buff, &count);
+    if (ret == 0)
+        x->result = x->frames;
+
     errno = ret;
 
     return ret;
@@ -582,6 +601,9 @@ static int agm_pcm_readi_frames(struct pcm_plugin *plugin, struct snd_xferi *x)
     count = x->frames * (priv->media_config->channels *
             agm_format_to_bits(priv->media_config->format) / 8);
     ret = agm_session_read(handle, buff, &count);
+    if (ret == 0)
+        x->result = x->frames;
+
     errno = ret;
 
     return ret;
@@ -707,9 +729,16 @@ static snd_pcm_sframes_t agm_pcm_get_avail(struct pcm_plugin *plugin)
     dir = (plugin->mode & PCM_IN) ? TX : RX;
 
     if (dir == RX) {
-        avail = priv->pos_buf->hw_ptr +
-            priv->total_size_frames -
-            priv->pos_buf->appl_ptr;
+        snd_pcm_uframes_t temp_value = 0;
+        // In first condition, if there is no overflow, temp_value holds the addition result;
+        // if there is overflow, __builtin_add_overflow returns true, then exit if clause.
+        // In second condition, if there is overflow, __builtin_sub_overflow returns true and
+        // we reset avail to 0. If there is no overflow, avail holds the final result and exit.
+        if (!__builtin_add_overflow(priv->pos_buf->hw_ptr, priv->total_size_frames,
+                &temp_value) &&
+            __builtin_sub_overflow(temp_value, priv->pos_buf->appl_ptr, &avail)) {
+            avail = 0;
+        }
 
         if (avail < 0)
             avail += priv->pos_buf->boundary;
@@ -881,24 +910,8 @@ static int agm_pcm_ioctl(struct pcm_plugin *plugin, int cmd, ...)
     return ret;
 }
 
-struct pcm_plugin_ops agm_pcm_ops = {
-    .close = agm_pcm_close,
-    .hw_params = agm_pcm_hw_params,
-    .sw_params = agm_pcm_sw_params,
-    .sync_ptr = agm_pcm_sync_ptr,
-    .writei_frames = agm_pcm_writei_frames,
-    .readi_frames = agm_pcm_readi_frames,
-    .ttstamp = agm_pcm_ttstamp,
-    .prepare = agm_pcm_prepare,
-    .start = agm_pcm_start,
-    .drop = agm_pcm_drop,
-    .mmap = agm_pcm_mmap,
-    .munmap = agm_pcm_munmap,
-    .poll = agm_pcm_poll,
-    .ioctl = agm_pcm_ioctl,
-};
-
-PCM_PLUGIN_OPEN_FN(agm_pcm_plugin)
+int agm_pcm_open(struct pcm_plugin **plugin, unsigned int card,
+        unsigned int device, unsigned int mode)
 {
     struct pcm_plugin *agm_pcm_plugin;
     struct agm_pcm_priv *priv;
@@ -958,8 +971,6 @@ PCM_PLUGIN_OPEN_FN(agm_pcm_plugin)
                               PCM_FORMAT_BIT(SNDRV_PCM_FORMAT_S32_LE));
 
     agm_pcm_plugin->card = card;
-    agm_pcm_plugin->ops = &agm_pcm_ops;
-    agm_pcm_plugin->node = pcm_node;
     agm_pcm_plugin->mode = mode;
     agm_pcm_plugin->constraints = &agm_pcm_constrs;
     agm_pcm_plugin->priv = priv;
@@ -968,6 +979,7 @@ PCM_PLUGIN_OPEN_FN(agm_pcm_plugin)
     priv->buffer_config = buffer_config;
     priv->session_config = session_config;
     priv->card_node = card_node;
+    priv->dev_node = pcm_node;
     priv->session_id = session_id;
     priv->mmap_status = false;
     snd_card_def_get_int(pcm_node, "session_mode", &sess_mode);
@@ -999,3 +1011,21 @@ err_plugin_free:
     else
        return -ret;
 }
+
+struct pcm_plugin_ops pcm_plugin_ops = {
+    .open = agm_pcm_open,
+    .close = agm_pcm_close,
+    .hw_params = agm_pcm_hw_params,
+    .sw_params = agm_pcm_sw_params,
+    .sync_ptr = agm_pcm_sync_ptr,
+    .writei_frames = agm_pcm_writei_frames,
+    .readi_frames = agm_pcm_readi_frames,
+    .ttstamp = agm_pcm_ttstamp,
+    .prepare = agm_pcm_prepare,
+    .start = agm_pcm_start,
+    .drop = agm_pcm_drop,
+    .mmap = agm_pcm_mmap,
+    .munmap = agm_pcm_munmap,
+    .poll = agm_pcm_poll,
+    .ioctl = agm_pcm_ioctl,
+};

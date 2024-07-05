@@ -25,6 +25,7 @@
  * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
 ** Changes from Qualcomm Innovation Center are provided under the following license:
 ** Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
 **
@@ -58,7 +59,6 @@
 ** OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 ** IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #define LOG_TAG "AGM: graph"
 
 #include <errno.h>
@@ -74,6 +74,9 @@
 #include <agm/graph_module.h>
 #include <agm/metadata.h>
 #include <agm/utils.h>
+#ifndef AGM_MEMLOG_UNSUPPORTED
+#include <agm/agm_memlogger.h>
+#endif
 
 #ifdef DYNAMIC_LOG_ENABLED
 #include <log_xml_parser.h>
@@ -85,11 +88,15 @@
 #define DEVICE_TX 1
 #define FILE_PATH_EXTN_MAX_SIZE 80
 #define ACDB_PATH_MAX_LENGTH 50
-#define ARRAX_FILE_PATH_EXTN "_arrax"
-#define ARRAX_SOC_ID 585
 
 #define TAGGED_MOD_SIZE_BYTES 1024
 
+enum {
+    MIID_IDX,
+    NUM_OF_PARAM_IDX,
+    PARAM_ID_IDX,
+    PARAM_LIST_MAX_IDX,
+};
 
 /* TODO: remove this later after including in spf header files */
 #define PARAM_ID_SOFT_PAUSE_START 0x800102e
@@ -312,27 +319,6 @@ done:
     return ret;
 }
 
-static int get_soc_id() {
-    FILE *fd;
-    char strData[32];
-    int soc_id = -1;
-    char socbuf[] = "/sys/devices/soc0/soc_id";
-    fd = fopen(socbuf, "r");
-    if (fd == NULL) {
-        AGM_LOGE("Unable to open file");
-        return -1;
-    }
-
-    fgets(strData, sizeof(strData), fd);
-    if (strlen(strData) != 0) {
-        soc_id = atoi(strData);
-    } else {
-        AGM_LOGE("id is null");
-    }
-    fclose(fd);
-    return soc_id;
-}
-
 int graph_init()
 {
     uint32_t ret = 0;
@@ -341,6 +327,7 @@ int graph_init()
     struct gsl_init_data init_data;
     const char *delta_file_path;
     char file_path_extn[FILE_PATH_EXTN_MAX_SIZE] = {0};
+    char file_path_extn_wo_variant[FILE_PATH_EXTN_MAX_SIZE] = {0};
     bool snd_card_found = false;
 
 #ifndef ACDB_PATH
@@ -349,13 +336,9 @@ int graph_init()
     /*Populate acdbfiles from the shared file path*/
     acdb_files.num_files = 0;
 
-    snd_card_found = get_file_path_extn(file_path_extn);
+    snd_card_found = get_file_path_extn(file_path_extn, file_path_extn_wo_variant);
     if (snd_card_found) {
-        if (get_soc_id() == ARRAX_SOC_ID) {
-            snprintf(acdb_path, ACDB_PATH_MAX_LENGTH, "%s%s%s", ACDB_PATH, file_path_extn, ARRAX_FILE_PATH_EXTN);
-        } else {
-            snprintf(acdb_path, ACDB_PATH_MAX_LENGTH, "%s%s", ACDB_PATH, file_path_extn);
-        }
+        snprintf(acdb_path, ACDB_PATH_MAX_LENGTH, "%s%s", ACDB_PATH, file_path_extn);
     } else {
         ret = -ENOENT;
         goto err;
@@ -363,8 +346,15 @@ int graph_init()
     AGM_LOGI("acdb file path: %s\n", acdb_path);
 
     ret = get_acdb_files_from_directory(acdb_path, &acdb_files);
-    if (ret)
-       goto err;
+    if (ret) {
+        /* if acdb_path is not found, try without variant */
+        snprintf(acdb_path, ACDB_PATH_MAX_LENGTH, "%s%s", ACDB_PATH,
+                file_path_extn_wo_variant);
+        AGM_LOGI("trying - acdb file path: %s\n", acdb_path);
+        ret = get_acdb_files_from_directory(acdb_path, &acdb_files);
+        if (ret)
+            goto err;
+    }
 
 #ifdef ACDB_DELTA_FILE_PATH
     delta_file_path = CONV_TO_STRING(ACDB_DELTA_FILE_PATH);
@@ -702,6 +692,9 @@ no_config:
     ret = gsl_open((struct gsl_key_vector *)&meta_data_kv->gkv,
                    (struct gsl_key_vector *)&meta_data_kv->ckv,
                    &graph_obj->graph_handle);
+#ifndef AGM_MEMLOG_UNSUPPORTED
+    agm_memlog_graph_enqueue(GRAPH_OPEN, ret, graph_obj->graph_handle);
+#endif
     if (ret != 0) {
        ret = ar_err_get_lnx_err_code(ret);
        AGM_LOGE("Failed to open the graph with error %d\n", ret);
@@ -729,7 +722,8 @@ free_graph_obj:
         list_remove(node);
         temp_mod = node_to_item(node, module_info_t, list);
         if (temp_mod->gkv) {
-            free(temp_mod->gkv->kv);
+            if (temp_mod->gkv->kv)
+                free(temp_mod->gkv->kv);
             free(temp_mod->gkv);
         }
         free(temp_mod);
@@ -776,6 +770,9 @@ int graph_close(struct graph_obj *graph_obj)
         ret = ar_err_get_lnx_err_code(ret);
         AGM_LOGE("gsl close failed error %d\n", ret);
     }
+#ifndef AGM_MEMLOG_UNSUPPORTED
+    agm_memlog_graph_enqueue(GRAPH_CLOSE, ret, graph_obj->graph_handle);
+#endif
     /*free the list of modules associated with this graph_object*/
     list_for_each_safe(node, temp_node, &graph_obj->tagged_mod_list) {
         list_remove(node);
@@ -916,6 +913,9 @@ int graph_start(struct graph_obj *graph_obj)
     graph_obj->state = STARTED;
 
 done:
+#ifndef AGM_MEMLOG_UNSUPPORTED
+    agm_memlog_graph_enqueue(GRAPH_START, ret, graph_obj->graph_handle);
+#endif
     pthread_mutex_unlock(&graph_obj->lock);
     AGM_LOGD("exit, ret %d", ret);
     return ret;
@@ -942,7 +942,9 @@ int graph_stop(struct graph_obj *graph_obj,
     }
 
     if (meta_data) {
+#ifdef AGM_DEBUG_METADATA
         metadata_print(meta_data);
+#endif
         memcpy (&(gsl_cmd_prop.gkv), &(meta_data->gkv),
                                        sizeof(struct gsl_key_vector));
         gsl_cmd_prop.property_id = meta_data->sg_props.prop_id;
@@ -977,6 +979,9 @@ int graph_stop(struct graph_obj *graph_obj,
     }
 
 done:
+#ifndef AGM_MEMLOG_UNSUPPORTED
+    agm_memlog_graph_enqueue(GRAPH_STOP, ret, graph_obj->graph_handle);
+#endif
     pthread_mutex_unlock(&graph_obj->lock);
     AGM_LOGD("exit, ret %d", ret);
     return ret;
@@ -1036,6 +1041,9 @@ int graph_pause_resume(struct graph_obj *graph_obj, bool pause)
     }
 
 done:
+#ifndef AGM_MEMLOG_UNSUPPORTED
+    agm_memlog_graph_enqueue(pause ? GRAPH_PAUSE : GRAPH_RESUME, ret, graph_obj->graph_handle);
+#endif
     return ret;
 }
 
@@ -1194,7 +1202,7 @@ int graph_set_cal(struct graph_obj *graph_obj,
      return ret;
 }
 
-int graph_set_acdb_param(void *payload)
+int graph_rw_acdb_param(void *payload, bool is_param_write)
 {
     int ret = 0;
     struct agm_acdb_tunnel_param *payloadACDBTunnelInfo = NULL;
@@ -1210,7 +1218,7 @@ int graph_set_acdb_param(void *payload)
     size_t size = 0;
     struct gsl_tag_module_info *tag_info;
     struct gsl_tag_module_info_entry *tag_entry;
-    uint32_t offset = 0;
+    uint32_t offset = 0, temp_sum = 0;
     uint32_t total_parsed_size = 0;
     uint8_t tag_pool[TAGGED_MOD_SIZE_BYTES] = { 0 };
 
@@ -1292,9 +1300,10 @@ int graph_set_acdb_param(void *payload)
         payloadACDBTunnelInfo->num_gkvs * sizeof(struct agm_key_value);
 
     AGM_LOGD("blob size = %d", payloadACDBTunnelInfo->blob_size);
-    actual_size = payloadACDBTunnelInfo->blob_size -
-        (payloadACDBTunnelInfo->num_gkvs + payloadACDBTunnelInfo->num_kvs) *
-                sizeof(struct agm_key_value);
+    __builtin_add_overflow(payloadACDBTunnelInfo->num_gkvs * sizeof(struct agm_key_value),
+            payloadACDBTunnelInfo->num_kvs * sizeof(struct agm_key_value),
+            &temp_sum);
+    __builtin_sub_overflow(payloadACDBTunnelInfo->blob_size, temp_sum, &actual_size);
     AGM_LOGD("actual size = 0x%x", actual_size);
     AGM_LOGI("num kvs = %d", kv.num_kvs);
     ptr = kv.kv;
@@ -1323,10 +1332,17 @@ int graph_set_acdb_param(void *payload)
         AGM_LOGV("%d data to acdb = 0x%x", i, *ptr++);
     }
 
-    if (payloadACDBTunnelInfo->isTKV)
-        ret = gsl_set_tag_data_to_acdb(&gkv, tag, &kv, ptr_to_param, actual_size);
-    else
-        ret = gsl_set_cal_data_to_acdb(&gkv, &kv, ptr_to_param, actual_size);
+    if (is_param_write) {
+        if (payloadACDBTunnelInfo->isTKV)
+            ret = gsl_set_tag_data_to_acdb(&gkv, tag, &kv, ptr_to_param, actual_size);
+        else
+            ret = gsl_set_cal_data_to_acdb(&gkv, &kv, ptr_to_param, actual_size);
+    } else {
+        if (payloadACDBTunnelInfo->isTKV)
+            ret = graph_get_tckv_data_from_acdb(&gkv, tag, &kv, ptr_to_param, &actual_size);
+        else
+            ret = graph_get_tckv_data_from_acdb(&gkv, 0, &kv, ptr_to_param, &actual_size);
+    }
 
     return ar_err_get_lnx_err_code(ret);
 }
@@ -1601,6 +1617,7 @@ int graph_change(struct graph_obj *graph_obj,
 
     pthread_mutex_lock(&graph_obj->lock);
     AGM_LOGD("entry graph_handle %p", graph_obj->graph_handle);
+    metadata_print(meta_data_kv);
 
     if (dev_obj != NULL) {
         mod = NULL;
@@ -1697,7 +1714,6 @@ int graph_change(struct graph_obj *graph_obj,
     change_graph.cal_key_vect.num_kvps = meta_data_kv->ckv.num_kvs;
     change_graph.cal_key_vect.kvp = (struct gsl_key_value_pair *)
                                      meta_data_kv->ckv.kv;
-    metadata_print(meta_data_kv);
     print_graph_alias(meta_data_kv);
     ret = gsl_ioctl(graph_obj->graph_handle, GSL_CMD_CHANGE_GRAPH, &change_graph,
                     sizeof(struct gsl_cmd_graph_select));
@@ -2170,6 +2186,94 @@ int graph_get_tagged_data(
     return gsl_get_tagged_data((struct gsl_key_vector *)graph_key_vect,
                 tag, (struct gsl_key_vector *)tag_key_vect,
                 payload, payload_size);
+}
+
+int graph_get_tckv_data_from_acdb(
+    const struct agm_key_vector_gsl *graph_key_vect, uint32_t tag,
+    struct agm_key_vector_gsl *tag_key_vect, uint8_t *payload,
+    size_t *payload_size)
+{
+    int ret = 0;
+    uint32_t *ptr = NULL;
+    size_t query_payload_size = *payload_size;
+    struct apm_module_param_data_t *param = (apm_module_param_data_t *)payload;
+    uint32_t *param_list;
+
+    if (!payload) {
+        return -EINVAL;
+    }
+
+    //payload: instance_id, param_id, size, error_code, data, padding if possible
+    ptr = (uint32_t *)payload;
+    param_list = calloc(1, PARAM_LIST_MAX_IDX * sizeof(uint32_t));
+    if (!param_list)
+        return -ENOMEM;
+
+    param_list[MIID_IDX] = ptr[0];
+    param_list[NUM_OF_PARAM_IDX] = 1;
+    param_list[PARAM_ID_IDX] = param->param_id;
+
+    AGM_LOGI("miid=0x%x param_id=0x%x",
+                param_list[MIID_IDX], param_list[PARAM_ID_IDX]);
+
+    if (tag) {
+        AGM_LOGI("Tag for tkv is 0x%x", tag);
+        ret = gsl_get_tag_data_from_acdb((struct gsl_key_vector *)graph_key_vect,
+                    tag, (struct gsl_key_vector *)tag_key_vect, 1, param_list,
+                    NULL, payload_size);
+    } else {
+        AGM_LOGI("This is ckv");
+        ret = gsl_get_cal_data_from_acdb((struct gsl_key_vector *)graph_key_vect,
+                    (struct gsl_key_vector *)tag_key_vect, 1, param_list,
+                    NULL, payload_size);
+    }
+
+    if (ret) {
+        AGM_LOGE("failed to get tagged data size");
+        ret = -EINVAL;
+        goto end;
+    }
+
+    AGM_LOGI("expected size = %d query_size= %d",
+                *payload_size, query_payload_size);
+    if (*payload_size > query_payload_size) {
+        AGM_LOGE("payload size is too small to hold result.");
+        ret = -ENOMEM;
+        goto end;
+    }
+
+    uint8_t *get_payload = calloc(1, *payload_size);
+    if (!get_payload) {
+        ret = -ENOMEM;
+        goto end;
+    }
+
+    if (tag) {
+        AGM_LOGE("This is tag data.");
+        ret = gsl_get_tag_data_from_acdb((struct gsl_key_vector *)graph_key_vect,
+                    tag, (struct gsl_key_vector *)tag_key_vect, 1, param_list,
+                    get_payload, payload_size);
+    } else {
+        AGM_LOGE("This is ckv data.");
+        ret = gsl_get_cal_data_from_acdb((struct gsl_key_vector *)graph_key_vect,
+                    (struct gsl_key_vector *)tag_key_vect, 1, param_list,
+                    get_payload, payload_size);
+    }
+
+    if (ret) {
+        AGM_LOGE("failed to get tagged data");
+        ret = -EINVAL;
+        goto error;
+    }
+
+    memcpy(payload, get_payload, *payload_size);
+
+error:
+    free(get_payload);
+
+end:
+    free(param_list);
+    return ret;
 }
 
 int graph_enable_acdb_persistence(uint8_t enable_flag)

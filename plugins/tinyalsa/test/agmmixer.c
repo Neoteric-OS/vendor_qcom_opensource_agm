@@ -27,11 +27,10 @@
 ** IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **
 ** Changes from Qualcomm Innovation Center are provided under the following license:
-** Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+** Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 ** SPDX-License-Identifier: BSD-3-Clause-Clear
-**/
+*/
 
-#include <errno.h>
 #include <expat.h>
 #include <tinyalsa/asoundlib.h>
 #include <sound/asound.h>
@@ -67,6 +66,13 @@ enum pcm_channel_map
    PCM_CHANNEL_CB = PCM_CHANNEL_CS,
    PCM_CHANNEL_LB = 8,
    PCM_CHANNEL_RB = 9,
+   PCM_CHANNEL_TS = 10,
+   PCM_CHANNEL_TFC = 11,
+   PCM_CHANNEL_MS = 12,
+   PCM_CHANNEL_FLC = 13,
+   PCM_CHANNEL_FRC = 14,
+   PCM_CHANNEL_RLC = 15,
+   PCM_CHANNEL_RRC = 16,
 };
 /* Payload of the PARAM_ID_MFC_OUTPUT_MEDIA_FORMAT parameter in the
  Media Format Converter Module. Following this will be the variable payload for channel_map. */
@@ -115,7 +121,7 @@ unsigned int slot_mask_map[5] = { 0, SLOT_MASK1, SLOT_MASK3, SLOT_MASK7, SLOT_MA
 
 #define PADDING_8BYTE_ALIGN(x)  ((((x) + 7) & 7) ^ 7)
 
-static unsigned int  bits_to_alsa_format(unsigned int bits)
+static unsigned int bits_to_sndrv_format(unsigned int bits)
 {
     switch (bits) {
     case 32:
@@ -130,9 +136,72 @@ static unsigned int  bits_to_alsa_format(unsigned int bits)
     };
 }
 
+static unsigned int alsa_to_sndrv_format(enum pcm_format fmt)
+{
+    switch (fmt) {
+    case PCM_FORMAT_S32_LE:
+        return SNDRV_PCM_FORMAT_S32_LE;
+    case PCM_FORMAT_S8:
+        return SNDRV_PCM_FORMAT_S8;
+    case PCM_FORMAT_S24_3LE:
+        return SNDRV_PCM_FORMAT_S24_3LE;
+    case PCM_FORMAT_S24_LE:
+        return SNDRV_PCM_FORMAT_S24_LE;
+    default:
+    case PCM_FORMAT_S16_LE:
+        return SNDRV_PCM_FORMAT_S16_LE;
+    };
+}
+
+static enum pcm_format get_pcm_format(char *str)
+{
+    if (!strncmp(str, "PCM_FORMAT_S16_LE", strlen("PCM_FORMAT_S16_LE"))) {
+        return PCM_FORMAT_S16_LE;
+    } else if (!strncmp(str, "PCM_FORMAT_S32_LE", strlen("PCM_FORMAT_S32_LE"))) {
+        return PCM_FORMAT_S32_LE;
+    } else if (!strncmp(str, "PCM_FORMAT_S8", strlen("PCM_FORMAT_S8"))) {
+        return PCM_FORMAT_S8;
+    } else if (!strncmp(str, "PCM_FORMAT_S24_LE", strlen("PCM_FORMAT_S24_LE"))) {
+        return PCM_FORMAT_S24_LE;
+    } else if (!strncmp(str, "PCM_FORMAT_S24_3LE", strlen("PCM_FORMAT_S24_3LE"))) {
+        return PCM_FORMAT_S24_3LE;
+    } else {
+        return PCM_FORMAT_INVALID;
+    }
+}
+
+int get_tinyalsa_pcm_bit_width(enum pcm_format fmt_id)
+{
+    int bit_width = 16;
+
+    switch (fmt_id) {
+    case PCM_FORMAT_S24_3LE:
+    /*
+     *This api returns the number of audio data bit width specific to the format
+     *e.g. In S24_LE, even if the number of bytes is 4, the audio data is only in 3 bytes
+     *Hence we return 24 as the bit_width, whereas the bitspersample for this format would
+     *return 32
+     */
+    case PCM_FORMAT_S24_LE:
+        bit_width = 24;
+        break;
+    case PCM_FORMAT_S32_LE:
+        bit_width = 32;
+        break;
+    case PCM_FORMAT_S8:
+        bit_width = 8;
+    case PCM_FORMAT_S16_LE:
+    default:
+        break;
+    }
+
+    return bit_width;
+}
+
 void start_tag(void *userdata, const XML_Char *tag_name, const XML_Char **attr)
 {
     struct device_config *config = (struct device_config *)userdata;
+    enum pcm_format fmt;
 
     if (strncmp(tag_name, "device", strlen("device")) != 0)
         return;
@@ -153,12 +222,23 @@ void start_tag(void *userdata, const XML_Char *tag_name, const XML_Char **attr)
     }
 
     if (strcmp(attr[6], "bits") != 0) {
-        printf("bits not found");
+        printf("bits not found\n");
         return;
     }
 
     if (strncmp(config->name, attr[1], sizeof(config->name)))
         return;
+
+    if (attr[8]) {
+        if (strcmp(attr[8], "format") == 0) {
+            printf("PCM format found\n");
+            fmt = get_pcm_format(attr[9]);
+            if (fmt != PCM_FORMAT_INVALID && fmt < PCM_FORMAT_MAX)
+                config->format = fmt;
+        }
+    } else {
+           config->format = PCM_FORMAT_INVALID;
+    }
 
     config->rate = atoi(attr[3]);
     config->ch = atoi(attr[5]);
@@ -168,6 +248,7 @@ void start_tag(void *userdata, const XML_Char *tag_name, const XML_Char **attr)
 void start_group_tag(void *userdata, const XML_Char *tag_name, const XML_Char **attr)
 {
     struct group_config *config = (struct group_config *)userdata;
+    enum pcm_format fmt;
 
     if (strncmp(tag_name, "group_device", strlen("group_device")) != 0)
         return;
@@ -188,18 +269,28 @@ void start_group_tag(void *userdata, const XML_Char *tag_name, const XML_Char **
     }
 
     if (strcmp(attr[6], "bits") != 0) {
-        printf("bits not found");
+        printf("bits not found\n");
         return;
     }
 
     if (strcmp(attr[8], "slot_mask") != 0) {
-        printf("slot_mask not found");
+        printf("slot_mask not found\n");
         return;
     }
 
     if (strncmp(config->name, attr[1], sizeof(config->name)))
         return;
 
+    if (attr[10]) {
+        if (strcmp(attr[10], "format") == 0) {
+            printf("PCM format found\n");
+            fmt = get_pcm_format(attr[11]);
+            if (fmt != PCM_FORMAT_INVALID && fmt < PCM_FORMAT_MAX)
+                config->format = fmt;
+        }
+    } else {
+        config->format = PCM_FORMAT_INVALID;
+    }
     config->rate = atoi(attr[3]);
     config->ch = atoi(attr[5]);
     config->bits = atoi(attr[7]);
@@ -251,10 +342,12 @@ static int get_backend_info(char* filename, char *intf_name, void *config, int t
     }
     if (type == DEVICE) {
         dev_cfg = (struct device_config *)config;
+        memset(dev_cfg, 0, sizeof(*dev_cfg));
         strlcpy(dev_cfg->name, intf_name, sizeof(dev_cfg->name));
         XML_SetElementHandler(parser, start_tag, NULL);
     } else {
         grp_cfg = (struct group_config *)config;
+        memset(grp_cfg, 0, sizeof(*grp_cfg));
         strlcpy(grp_cfg->name, intf_name, sizeof(grp_cfg->name));
         XML_SetElementHandler(parser, start_group_tag, NULL);
     }
@@ -352,7 +445,10 @@ int set_agm_group_device_config(struct mixer *mixer, char *intf_name, struct gro
 
     grp_config[0] = config->rate;
     grp_config[1] = config->ch;
-    grp_config[2] = bits_to_alsa_format(config->bits);
+    if (config->format == PCM_FORMAT_INVALID)
+        grp_config[2] = bits_to_sndrv_format(config->bits);
+    else
+        grp_config[2] = alsa_to_sndrv_format(config->format);
     grp_config[3] = AGM_DATA_FORMAT_FIXED_POINT;
     grp_config[4] = config->slot_mask;
 
@@ -427,8 +523,7 @@ done:
     return ret;
 }
 
-int set_agm_device_media_config(struct mixer *mixer, unsigned int channels,
-                                unsigned int rate, unsigned int bits, char *intf_name)
+int set_agm_device_media_config(struct mixer *mixer, char *intf_name, struct device_config *config)
 {
     char *control = "rate ch fmt";
     char *mixer_str;
@@ -452,9 +547,12 @@ int set_agm_device_media_config(struct mixer *mixer, unsigned int channels,
         return ENOENT;
     }
 
-    media_config[0] = rate;
-    media_config[1] = channels;
-    media_config[2] = bits_to_alsa_format(bits);
+    media_config[0] = config->rate;
+    media_config[1] = config->ch;
+    if (config->format == PCM_FORMAT_INVALID)
+        media_config[2] = bits_to_sndrv_format(config->bits);
+    else
+        media_config[2] = alsa_to_sndrv_format(config->format);
     media_config[3] = AGM_DATA_FORMAT_FIXED_POINT;
 
     ret = mixer_ctl_set_array(ctl, &media_config, sizeof(media_config)/sizeof(media_config[0]));
@@ -589,7 +687,7 @@ int set_agm_audio_intf_metadata(struct mixer *mixer, char *intf_name, unsigned i
     struct agm_key_value *gkv = NULL, *ckv = NULL;
     struct prop_data *prop = NULL;
     uint8_t *metadata = NULL;
-    uint32_t num_gkv = 1, num_ckv = 2, num_props = 0;
+    uint32_t num_gkv = 1, num_ckv = 3, num_props = 0;
     uint32_t gkv_size, ckv_size, prop_size, ckv_index = 0;
     int ctl_len = 0, offset = 0;
     int ret = 0;
@@ -635,6 +733,10 @@ int set_agm_audio_intf_metadata(struct mixer *mixer, char *intf_name, unsigned i
     ckv_index++;
     ckv[ckv_index].key = BITWIDTH;
     ckv[ckv_index].value = bitwidth;
+
+    ckv_index++;
+    ckv[ckv_index].key = GAIN;;
+    ckv[ckv_index].value = 0;
 
     prop->prop_id = 0;  //Update prop_id here
     prop->num_values = num_props;
@@ -758,6 +860,62 @@ void populateChannelMap(uint16_t *pcmChannel, uint8_t numChannel)
         pcmChannel[5] = PCM_CHANNEL_RB;
         pcmChannel[6] = PCM_CHANNEL_LS;
         pcmChannel[7] = PCM_CHANNEL_RS;
+    } else if (numChannel == 10) {
+        pcmChannel[0] = PCM_CHANNEL_L;
+        pcmChannel[1] = PCM_CHANNEL_R;
+        pcmChannel[2] = PCM_CHANNEL_C;
+        pcmChannel[3] = PCM_CHANNEL_LS;
+        pcmChannel[4] = PCM_CHANNEL_RS;
+        pcmChannel[5] = PCM_CHANNEL_LFE;
+        pcmChannel[6] = PCM_CHANNEL_CS;
+        pcmChannel[7] = PCM_CHANNEL_LB;
+        pcmChannel[8] = PCM_CHANNEL_RB;
+        pcmChannel[9] = PCM_CHANNEL_TS;
+    } else if (numChannel == 12) {
+        pcmChannel[0] = PCM_CHANNEL_L;
+        pcmChannel[1] = PCM_CHANNEL_R;
+        pcmChannel[2] = PCM_CHANNEL_C;
+        pcmChannel[3] = PCM_CHANNEL_LS;
+        pcmChannel[4] = PCM_CHANNEL_RS;
+        pcmChannel[5] = PCM_CHANNEL_LFE;
+        pcmChannel[6] = PCM_CHANNEL_CS;
+        pcmChannel[7] = PCM_CHANNEL_LB;
+        pcmChannel[8] = PCM_CHANNEL_RB;
+        pcmChannel[9] = PCM_CHANNEL_TS;
+        pcmChannel[10] = PCM_CHANNEL_TFC;
+        pcmChannel[11] = PCM_CHANNEL_MS;
+    } else if (numChannel == 14) {
+        pcmChannel[0] = PCM_CHANNEL_L;
+        pcmChannel[1] = PCM_CHANNEL_R;
+        pcmChannel[2] = PCM_CHANNEL_C;
+        pcmChannel[3] = PCM_CHANNEL_LS;
+        pcmChannel[4] = PCM_CHANNEL_RS;
+        pcmChannel[5] = PCM_CHANNEL_LFE;
+        pcmChannel[6] = PCM_CHANNEL_CS;
+        pcmChannel[7] = PCM_CHANNEL_LB;
+        pcmChannel[8] = PCM_CHANNEL_RB;
+        pcmChannel[9] = PCM_CHANNEL_TS;
+        pcmChannel[10] = PCM_CHANNEL_TFC;
+        pcmChannel[11] = PCM_CHANNEL_MS;
+        pcmChannel[12] = PCM_CHANNEL_FLC;
+        pcmChannel[13] = PCM_CHANNEL_FRC;
+    } else if (numChannel == 16) {
+        pcmChannel[0] = PCM_CHANNEL_L;
+        pcmChannel[1] = PCM_CHANNEL_R;
+        pcmChannel[2] = PCM_CHANNEL_C;
+        pcmChannel[3] = PCM_CHANNEL_LS;
+        pcmChannel[4] = PCM_CHANNEL_RS;
+        pcmChannel[5] = PCM_CHANNEL_LFE;
+        pcmChannel[6] = PCM_CHANNEL_CS;
+        pcmChannel[7] = PCM_CHANNEL_LB;
+        pcmChannel[8] = PCM_CHANNEL_RB;
+        pcmChannel[9] = PCM_CHANNEL_TS;
+        pcmChannel[10] = PCM_CHANNEL_TFC;
+        pcmChannel[11] = PCM_CHANNEL_MS;
+        pcmChannel[12] = PCM_CHANNEL_FLC;
+        pcmChannel[13] = PCM_CHANNEL_FRC;
+        pcmChannel[14] = PCM_CHANNEL_RLC;
+        pcmChannel[15] = PCM_CHANNEL_RRC;
     }
 }
 

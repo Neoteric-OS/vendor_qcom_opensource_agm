@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -28,7 +28,7 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -70,6 +70,8 @@
 #include <signal.h>
 #include "gsl_intf.h"
 #include <hwbinder/IPCThreadState.h>
+#include <utils/ProcessCallStack.h>
+#include <cutils/properties.h>
 
 #define MAX_CACHE_SIZE 64
 #define NUM_GKV(x)                     (*((uint32_t *) x))
@@ -117,6 +119,16 @@ void dumpAgmStackTrace(struct agm_dump_info *d_info) {
                  "signal %d (<debuggerd signal>), code -1 "
                  "(SI_QUEUE from pid %d, uid %d)",
                  d_info->signal, d_info->pid, d_info->uid);
+#ifdef _ANDROID_
+        char propValue[PROPERTY_VALUE_MAX];
+        property_get("ro.debuggable", propValue, "0");
+        if(atoi(propValue) == 1) {
+            std::string prefix = "audioserver_" + std::to_string(d_info->pid) + " ";
+            android::ProcessCallStack pcs;
+            pcs.update();
+            pcs.log(LOG_TAG, ANDROID_LOG_FATAL, prefix.c_str());
+        }
+#endif
         if (sigqueue(getpid(), DEBUGGER_SIGNAL, {.sival_int = 0}) < 0) {
             ALOGW("%s: Sending signal %d failed with error %d",
                     __func__, DEBUGGER_SIGNAL, errno);
@@ -192,7 +204,6 @@ void client_death_notifier::serviceDied(uint64_t cookie,
                 session_handle = NULL;
             }
             list_remove(node);
-            handle->clbk_binder->unlinkToDeath(this);
             free(handle);
         }
     }
@@ -655,7 +666,7 @@ Return<void> AGM::ipc_agm_session_get_params(uint32_t session_id,
     int32_t ret = 0;
     hidl_vec<uint8_t> payload_hidl;
 
-    if (buff.size() < size) {
+     if (buff.size() < size) {
         _hidl_cb(-EINVAL, size);
         return Void();
     }
@@ -674,6 +685,39 @@ Return<void> AGM::ipc_agm_session_get_params(uint32_t session_id,
        memcpy(payload_hidl.data(), payload_local, (size_t)size);
 
      _hidl_cb(ret, payload_hidl);
+    free(payload_local);
+    return Void();
+}
+
+Return<void> AGM::ipc_agm_get_params_from_acdb_tunnel(
+                        const hidl_vec<uint8_t>& payload, uint32_t size,
+                        ipc_agm_get_params_from_acdb_tunnel_cb _hidl_cb) {
+    uint8_t * payload_local = NULL;
+    size_t size_local;
+    size_local = (size_t) size;
+    hidl_vec<uint8_t> payload_hidl;
+
+    if (size > payload.size()) {
+        ALOGE("%s: Invalid param", __func__);
+        return Void();
+    }
+    if (size_local) {
+        payload_local = (uint8_t *) calloc (1, size_local);
+        if (payload_local == NULL) {
+            ALOGE("%s: Cannot allocate memory for payload_local\n", __func__);
+            _hidl_cb(-ENOMEM, payload_hidl, size);
+            return Void();
+        }
+    }
+
+    memcpy(payload_local, payload.data(), size);
+    int32_t ret = agm_get_params_from_acdb_tunnel(payload_local,
+                                                      &size_local);
+    payload_hidl.resize(size_local);
+    if (payload_local)
+        memcpy(payload_hidl.data(), payload_local, size_local);
+    uint32_t size_hidl = (uint32_t) size_local;
+    _hidl_cb(ret, payload_hidl, size_hidl);
     free(payload_local);
     return Void();
 }
@@ -1173,6 +1217,10 @@ Return<int32_t> AGM::ipc_agm_client_register_callback(const sp<IAGMCallback>& cb
     client_info *client_handle = NULL;
     struct listnode* node = NULL;
 
+    if (cb == NULL) {
+        ALOGE("%s: Invalid cb binder request\n", __func__);
+        return -EINVAL;
+    }
     pthread_mutex_lock(&client_list_lock);
     list_for_each(node, &client_list) {
         client_handle = node_to_item(node, client_info, list);
@@ -1306,6 +1354,8 @@ Return<void> AGM::ipc_agm_session_get_buf_info(uint32_t session_id, uint32_t fla
     native_handle_t *posHidlHandle = nullptr;
 
     ALOGV("%s : session_id = %d\n", __func__, session_id);
+
+    memset(&buf_info, 0, sizeof(struct agm_buf_info));
 
     ret = agm_session_get_buf_info(session_id, &buf_info, flag);
     if (!ret) {
@@ -1604,18 +1654,26 @@ Return<int32_t> AGM::ipc_agm_session_write_datapath_params(uint32_t session_id,
     buf.addr = nullptr;
     buf.metadata = nullptr;
 
-    bufSize = buff_hidl.data()->size;
+    if (1 != buff_hidl.size()) {
+        ALOGE("%s: buff_hidl size is not equal to 1.", __func__);
+        goto exit;
+    }
+    bufSize = buff_hidl[0].size;
     buf.addr = (uint8_t *)calloc(1, bufSize);
     if (!buf.addr) {
         ALOGE("%s: failed to calloc", __func__);
         goto exit;
     }
+    if (bufSize != buff_hidl[0].buffer.size()) {
+        ALOGE("%s: Invalid buffer vector size", __func__);
+        goto exit;
+    }
     buf.size = (size_t)bufSize;
-    buf.timestamp = buff_hidl.data()->timestamp;
-    buf.flags = buff_hidl.data()->flags;
+    buf.timestamp = buff_hidl[0].timestamp;
+    buf.flags = buff_hidl[0].flags;
 
     if (bufSize)
-        memcpy(buf.addr, buff_hidl.data()->buffer.data(), bufSize);
+        memcpy(buf.addr, buff_hidl[0].buffer.data(), bufSize);
     else {
         ALOGE("%s: buf size is null", __func__);
         goto exit;

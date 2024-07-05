@@ -27,37 +27,10 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted (subject to the limitations in the
- * disclaimer below) provided that the following conditions are met:
+ * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
  *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *
- *     * Redistributions in binary form must reproduce the above
- *       copyright notice, this list of conditions and the following
- *       disclaimer in the documentation and/or other materials provided
- *       with the distribution.
- *
- *     * Neither the name of Qualcomm Innovation Center, Inc. nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
- * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
- * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
- * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
- * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _AGM_INTF_H_
@@ -138,6 +111,7 @@ enum agm_media_format
     AGM_FORMAT_EVRC,            /**< EVRC codec */
     AGM_FORMAT_G711,            /**< G711 codec */
     AGM_FORMAT_QCELP,            /**< G711 codec */
+    AGM_FORMAT_OPUS,            /**< OPUS codec */
     AGM_FORMAT_MAX,
 };
 
@@ -218,6 +192,7 @@ struct agm_session_aac_dec {
     uint16_t total_size_of_PCE_bits;/**< PCE bits size */
     uint32_t sample_rate;           /**< Sample rate */
 };
+
 /**
  * AAC encoder parameters
  */
@@ -225,8 +200,10 @@ struct agm_session_aac_enc_cfg {
     uint16_t aac_enc_mode; /**< AAC encoder mode */
     uint16_t aac_fmt_flag; /**< AAC format flag */
 };
+
 struct agm_session_aac_enc {
     uint32_t aac_bit_rate;
+    uint32_t global_cutoff_freq;
     struct agm_session_aac_enc_cfg enc_cfg;
 };
 
@@ -309,6 +286,24 @@ struct agm_session_wmapro_dec {
 };
 
 /**
+ * OPUS decoder parameters
+ */
+struct agm_session_opus_dec {
+    uint16_t bitstream_format;
+    uint16_t payload_type;
+    uint8_t version;
+    uint8_t num_channels;
+    uint16_t pre_skip;
+    uint32_t sample_rate;
+    uint16_t output_gain;
+    uint8_t mapping_family;
+    uint8_t stream_count;
+    uint8_t coupled_count;
+    uint8_t channel_map[8];
+    uint8_t reserved[3];
+};
+
+/**
  * Session encoder/decoder parameters
  */
 union agm_session_codec
@@ -320,6 +315,7 @@ union agm_session_codec
     struct agm_session_ape_dec ape_dec;        /**< APE decoder config */
     struct agm_session_wma_dec wma_dec;        /**< WMA decoder config */
     struct agm_session_wmapro_dec wmapro_dec;  /**< WMAPro decoder config */
+    struct agm_session_opus_dec opus_dec;      /**< OPUS decoder config */
 };
 
 /**
@@ -748,6 +744,17 @@ int agm_session_get_params(uint32_t session_id,
     void* payload, size_t size);
 
 /**
+ * \brief Get parameters for modules at acdb without session
+ *
+
+ * \param[in] payload - payload with tag and calibration date
+ * \param[in] size - size of payload
+ *
+ *  \return 0 on success, error code on failure.
+ */
+int agm_get_params_from_acdb_tunnel(void *payload, size_t *size);
+
+/**
  * \brief Set parameters for modules in b/w stream and audio interface
  *
  * \param[in] session_id - Valid audio session id
@@ -779,7 +786,7 @@ int agm_set_params_with_tag_to_acdb(uint32_t session_id, uint32_t aif_id,
                                 void *payload, size_t size);
 
 /**
- * \brief Set parameters for modules at acd without session
+ * \brief Set parameters for modules at acdb without session
  *
 
  * \param[in] payload - payload with tag and calibration date

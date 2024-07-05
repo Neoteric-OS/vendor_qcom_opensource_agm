@@ -27,9 +27,9 @@
 ** IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **
 ** Changes from Qualcomm Innovation Center are provided under the following license:
-** Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+** Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
 ** SPDX-License-Identifier: BSD-3-Clause-Clear
-**/
+*/
 
 #include <errno.h>
 #include <tinyalsa/asoundlib.h>
@@ -79,6 +79,10 @@ static void read_event_data(struct mixer *mixer, char *mixer_str)
     num_values = mixer_ctl_get_num_values(ctl);
     printf("%s - %d\n", __func__, num_values);
     buf = calloc(1, num_values);
+    if (!buf) {
+        printf("Failed to allocate memory for buffer\n");
+        return;
+    }
 
     ret = mixer_ctl_get_array(ctl, buf, num_values);
     if (ret < 0) {
@@ -97,7 +101,7 @@ static void event_wait_thread_loop(void *context)
 {
     struct mixer *mixer = (struct mixer *)context;
     int ret = 0;
-    struct ctl_event mixer_event = {0};
+    struct mixer_ctl_event mixer_event = {0};
 
     printf("subscribing for event\n");
     mixer_subscribe_events(mixer, 1);
@@ -109,8 +113,8 @@ static void event_wait_thread_loop(void *context)
     } else if (ret > 0) {
         ret = mixer_read_event(mixer, &mixer_event);
         if (ret >= 0) {
-            printf("Event Received %s\n",  mixer_event.data.elem.id.name);
-            read_event_data(mixer, mixer_event.data.elem.id.name);
+            printf("Event Received %s\n",  mixer_event.data.element.id.name);
+            read_event_data(mixer, mixer_event.data.element.id.name);
         } else {
             printf("%s: mixer_read failed, ret = %d\n", __func__, ret);
         }
@@ -219,6 +223,11 @@ static void* merge_payload(uint32_t miid, int num, int *sum,  ...)
     uint8_t *buf;
     uint32_t *module_instance_id = NULL;
 
+    if (!size || !temp) {
+        printf("Failed to allocate memory for size and temp\n");
+        return NULL;
+    }
+
     va_start(valist, num);
     for (i = 0; i < num; i++) {
         temp[i] = va_arg(valist, char *);
@@ -252,6 +261,7 @@ void voice_ui_test(unsigned int card, unsigned int device, unsigned int audio_in
     char *ec_intf_name = NULL;
     struct pcm_config config;
     struct pcm *pcm;
+    struct device_config dev_config;
     int ret = 0;
     enum pcm_format format = PCM_FORMAT_S16_LE;
     uint32_t miid = 0, param_size = 0;
@@ -268,6 +278,10 @@ void voice_ui_test(unsigned int card, unsigned int device, unsigned int audio_in
     config.silence_threshold = 0;
     stream_kv = stream_kv ? stream_kv : VOICE_UI;
 
+    dev_config.rate = config.rate;
+    dev_config.ch = config.channels;
+    dev_config.bits = get_tinyalsa_pcm_bit_width(config.format);
+    dev_config.format = config.format;
     mixer = mixer_open(card);
     if (!mixer) {
         printf("Failed to open mixer\n");
@@ -275,8 +289,7 @@ void voice_ui_test(unsigned int card, unsigned int device, unsigned int audio_in
     }
 
     /* set device/audio_intf media config mixer control */
-    if (set_agm_device_media_config(mixer, config.channels, config.rate,
-                                    pcm_format_to_bits(format), intf_name)) {
+    if (set_agm_device_media_config(mixer, intf_name, &dev_config)) {
         printf("Failed to set device media config\n");
         goto err_close_mixer;
     }
@@ -408,12 +421,12 @@ int main(int argc, char **argv)
             if (*argv)
                 device = atoi(*argv);
         }
-        if (strcmp(*argv, "-D") == 0) {
+        if (*argv && strcmp(*argv, "-D") == 0) {
             argv++;
             if (*argv)
                 card = atoi(*argv);
         }
-        if (strcmp(*argv, "-i") == 0) {
+        if (*argv && strcmp(*argv, "-i") == 0) {
             argv++;
             if (*argv)
                 audio_intf = atoi(*argv);
@@ -422,7 +435,7 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
-        if (strcmp(*argv, "-e") == 0) {
+        if (*argv && strcmp(*argv, "-e") == 0) {
             argv++;
             if (*argv)
                 ec_aif = atoi(*argv);
@@ -431,23 +444,23 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
-        if (strcmp(*argv, "-T") == 0) {
+        if (*argv && strcmp(*argv, "-T") == 0) {
             argv++;
             if (*argv)
                 cap_time = atoi(*argv);
-        } else if (strcmp(*argv, "-dkv") == 0) {
+        } else if (*argv && strcmp(*argv, "-dkv") == 0) {
             argv++;
             if (*argv)
                 device_kv = convert_char_to_hex(*argv);
-        } else if (strcmp(*argv, "-skv") == 0) {
+        } else if (*argv && strcmp(*argv, "-skv") == 0) {
             argv++;
             if (*argv)
                 stream_kv = convert_char_to_hex(*argv);
-        } else if (strcmp(*argv, "-ikv") == 0) {
+        } else if (*argv && strcmp(*argv, "-ikv") == 0) {
             argv++;
             if (*argv)
                 instance_kv = atoi(*argv);
-        } else if (strcmp(*argv, "-dppkv") == 0) {
+        } else if (*argv && strcmp(*argv, "-dppkv") == 0) {
             argv++;
             if (*argv)
                 devicepp_kv = convert_char_to_hex(*argv);

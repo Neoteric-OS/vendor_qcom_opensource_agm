@@ -25,6 +25,10 @@
 ** WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
 ** OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 ** IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*  Changes from Qualcomm Innovation Center are provided under the following license:
+*
+*  Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+*  SPDX-License-Identifier: BSD-3-Clause-Clear
 **/
 
 #include <errno.h>
@@ -77,6 +81,23 @@ struct snd_dev_def_card {
     struct listnode pcm_devs_list;
     struct listnode mixer_devs_list;
     struct listnode compr_devs_list;
+};
+
+struct snd_node_ops {
+    /** Function pointer to get card definition */
+    void* (*open_card)(unsigned int card);
+    /** Function pointer to release card definition */
+    void (*close_card)(void *card);
+    /** Get interger type properties from device definition */
+    int (*get_int)(void *node, const char *prop, int *val);
+    /** Get string type properties from device definition */
+    int (*get_str)(void *node, const char *prop, char **val);
+    /** Function pointer to get mixer definition */
+    void* (*get_mixer)(void *card);
+    /** Function pointer to get PCM definition */
+    void* (*get_pcm)(void *card, unsigned int id);
+    /** Function pointer to get COMPRESS definition */
+    void* (*get_compress)(void *card, unsigned int id);
 };
 
 static struct listnode snd_card_list;
@@ -486,16 +507,19 @@ void *snd_card_def_get_card(unsigned int card)
         if (card_found) {
             card_def->refcnt++;
             pthread_rwlock_unlock(&snd_rwlock);
-            free(snd_card_name);
+            if (snd_card_name != NULL)
+               free(snd_card_name);
             return card_def;
         }
     }
 
+    card_def = NULL;
     /* read XML */
     file = fopen(CARD_DEF_FILE, "r");
     if (!file) {
         pthread_rwlock_unlock(&snd_rwlock);
-        free(snd_card_name);
+        if (snd_card_name != NULL )
+           free(snd_card_name);
         return NULL;
     }
 
@@ -503,7 +527,8 @@ void *snd_card_def_get_card(unsigned int card)
     if (!parser) {
         fclose(file);
         pthread_rwlock_unlock(&snd_rwlock);
-        free(snd_card_name);
+        if (snd_card_name != NULL)
+           free(snd_card_name);
         return NULL;
     }
 
@@ -538,7 +563,8 @@ void *snd_card_def_get_card(unsigned int card)
         card_def->refcnt++;
     }
 ret:
-    free(snd_card_name);
+    if (snd_card_name != NULL)
+       free(snd_card_name);
     card_data.card_name = NULL;
     XML_ParserFree(parser);
     fclose(file);
@@ -599,6 +625,21 @@ void *snd_card_def_get_node(void *card_node, unsigned int id, int type)
 
     pthread_rwlock_unlock(&snd_rwlock);
     return NULL;
+}
+
+void *snd_card_def_get_pcm(void *card_node, unsigned int id)
+{
+    return snd_card_def_get_node(card_node, id, SND_NODE_TYPE_PCM);
+}
+
+void *snd_card_def_get_compress(void *card_node, unsigned int id)
+{
+    return snd_card_def_get_node(card_node, id, SND_NODE_TYPE_COMPR);
+}
+
+void *snd_card_def_get_mixer(void *card_node)
+{
+    return snd_card_def_get_node(card_node, 1, SND_NODE_TYPE_MIXER);
 }
 
 int snd_card_def_get_num_node(void *card_node, int type)
@@ -743,3 +784,13 @@ int snd_card_def_get_str(void *node, const char *prop, char **val)
     pthread_rwlock_unlock(&snd_rwlock);
     return ret;
 }
+
+struct snd_node_ops snd_card_ops = {
+    .open_card = snd_card_def_get_card,
+    .close_card = snd_card_def_put_card,
+    .get_int = snd_card_def_get_int,
+    .get_str = snd_card_def_get_str,
+    .get_pcm = snd_card_def_get_pcm,
+    .get_compress = snd_card_def_get_compress,
+    .get_mixer = snd_card_def_get_mixer,
+};

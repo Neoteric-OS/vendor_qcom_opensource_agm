@@ -21,12 +21,11 @@ LOCAL_SHARED_LIBRARIES := \
     libcutils \
     liblog
 
-LOCAL_CFLAGS += -Wno-format -Wno-incompatible-pointer-types
+LOCAL_CFLAGS += -Wno-format -Wno-incompatible-pointer-types    
 
 #if android version is R, refer to qtitinyxx otherwise use upstream ones
 #This assumes we would be using AR code only for Android R and subsequent versions.
 ifneq ($(filter 11 R, $(PLATFORM_VERSION)),)
-LOCAL_C_INCLUDES += $(TOP)/vendor/qcom/opensource/tinyalsa/include
 LOCAL_SHARED_LIBRARIES += libqti-tinyalsa
 else
 LOCAL_SHARED_LIBRARIES += libtinyalsa
@@ -61,13 +60,12 @@ LOCAL_SHARED_LIBRARIES := \
     libcutils \
     libutils \
     liblog
-
+    
 LOCAL_CFLAGS += -Wno-unused-parameter -Wno-unused-variable
 
 #if android version is R, refer to qtitinyxx otherwise use upstream ones
 #This assumes we would be using AR code only for Android R and subsequent versions.
 ifneq ($(filter 11 R, $(PLATFORM_VERSION)),)
-LOCAL_C_INCLUDES += $(TOP)/vendor/qcom/opensource/tinyalsa/include
 LOCAL_SHARED_LIBRARIES += libqti-tinyalsa
 else
 LOCAL_SHARED_LIBRARIES += libtinyalsa
@@ -86,7 +84,7 @@ include $(BUILD_SHARED_LIBRARY)
 # Build libagm_compress_plugin
 include $(CLEAR_VARS)
 
-LOCAL_MODULE        := libagm_compress_plugin
+LOCAL_MODULE        := libtinycompress_module_agm
 LOCAL_MODULE_OWNER  := qti
 LOCAL_MODULE_TAGS   := optional
 LOCAL_VENDOR_MODULE := true
@@ -107,13 +105,11 @@ LOCAL_SHARED_LIBRARIES := \
     libcutils \
     liblog
 
-LOCAL_CFLAGS += -Wno-format -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function
+LOCAL_CFLAGS += -Wno-format -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function    
 
-#if android version is R, refer to qtitinyxx otherwise use upstream ones
-#This assumes we would be using AR code only for Android R and subsequent versions.
-ifneq ($(filter 11 R, $(PLATFORM_VERSION)),)
-LOCAL_C_INCLUDES += $(TOP)/vendor/qcom/opensource/tinyalsa/include
-LOCAL_C_INCLUDES += $(TOP)/vendor/qcom/opensource/tinycompress/include
+# Use flag based selection to use QTI vs open source tinycompress project
+
+ifeq ($(TARGET_USES_QTI_TINYCOMPRESS),true)
 LOCAL_SHARED_LIBRARIES += libqti-tinyalsa\
                           libqti-tinycompress
 else

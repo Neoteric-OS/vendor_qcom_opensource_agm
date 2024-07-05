@@ -4,7 +4,6 @@
  *
  * BSD LICENSE
  *
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  * Copyright (c) 2011-2012, Intel Corporation
  * Copyright (c) 2013-2014, Wolfson Microelectronic Ltd.
  * All rights reserved.
@@ -56,7 +55,7 @@
  * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  *
  * Changes from Qualcomm Innovation Center are provided under the following license:
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 #include <stdint.h>
@@ -320,8 +319,7 @@ static void capture_samples(char *name, unsigned int card, unsigned int device,
     }
 
     /* set device/audio_intf media config mixer control */
-    if (set_agm_device_media_config(mixer, dev_config->ch, dev_config->rate,
-                                    dev_config->bits, intf_name)) {
+    if (set_agm_device_media_config(mixer, intf_name, dev_config)) {
         printf("Failed to set device media config\n");
         goto mixer_exit;
     }
@@ -474,13 +472,13 @@ static void sig_handler(int signum __attribute__ ((unused)))
 
 int main(int argc, char **argv)
 {
-    char *file;
+    char *file = NULL;
     unsigned long buffer_size = 0;
     unsigned int card = 0, device = 0, frag = 0, length = 0;
     unsigned int rate = DEFAULT_RATE, channels = DEFAULT_CHANNELS;
     unsigned int bits = 16;
     unsigned int format = DEFAULT_FORMAT;
-    char* intf_name;
+    char* intf_name = NULL;
     int ret = 0;
     unsigned int devicepp_kv = DEVICEPP_TX_AUDIO_FLUENCE_SMECNS;
     unsigned int stream_kv = 0;

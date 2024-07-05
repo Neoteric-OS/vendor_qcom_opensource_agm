@@ -14,19 +14,13 @@ LOCAL_MODULE_OWNER  := qti
 LOCAL_MODULE_TAGS   := optional
 LOCAL_VENDOR_MODULE := true
 
-LOCAL_CFLAGS        := -D_ANDROID_
+LOCAL_CFLAGS        := -D_ANDROID_ -DAGM_DEBUG_METADATA -DAGM_USE_CUTILS
 LOCAL_CFLAGS        += -Wno-tautological-compare -Wno-macro-redefined -Wall
 LOCAL_CFLAGS        += -D_GNU_SOURCE -DACDB_PATH=\"/vendor/etc/acdbdata/\"
 LOCAL_CFLAGS        += -DACDB_DELTA_FILE_PATH="/data/vendor/audio/acdbdata/delta"
 
 LOCAL_C_INCLUDES    := $(LOCAL_PATH)/inc/public
 LOCAL_C_INCLUDES    += $(LOCAL_PATH)/inc/private
-
-#if android version is R, use qtitinyalsa headers otherwise use upstream ones
-#This assumes we would be using AR code only for Android R and subsequent versions.
-ifneq ($(filter 11 R, $(PLATFORM_VERSION)),)
-LOCAL_C_INCLUDES    += $(TOP)/vendor/qcom/opensource/tinyalsa/include
-endif
 
 LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/inc/public
 
@@ -38,20 +32,24 @@ LOCAL_SRC_FILES  := \
     src/session_obj.c\
     src/device.c \
     src/utils.c \
-    src/device_hw_ep.c
+    src/device_hw_ep.c \
+    src/agm_memlogger.c
 
 LOCAL_HEADER_LIBRARIES := \
     libarpal_headers \
     libspf-headers \
     libutils_headers \
-    libacdb_headers
+    libacdb_headers \
+    libarmemlog_headers
 
 LOCAL_SHARED_LIBRARIES := \
     libar-gsl \
     liblog \
     liblx-osal \
     libaudioroute \
-    libats
+    libats \
+    libarmemlog \
+    libcutils
 
 #if android version is R, use qtitinyalsa lib otherwise use upstream ones
 #This assumes we would be using AR code only for Android R and subsequent versions.

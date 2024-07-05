@@ -1,6 +1,5 @@
 /*
 ** Copyright (c) 2019, The Linux Foundation. All rights reserved.
-** Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
 **
 ** Redistribution and use in source and binary forms, with or without
 ** modification, are permitted provided that the following conditions are
@@ -26,6 +25,39 @@
 ** WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
 ** OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 ** IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Changes from Qualcomm Innovation Center are provided under the following license:
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *
+ *   * Neither the name of Qualcomm Innovation Center, Inc. nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **/
 
 #define LOG_TAG "ipc_proxy"
@@ -59,6 +91,8 @@
 #ifndef MIN
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #endif
+
+#define MAX_KVPAIR 48
 
 #ifndef memscpy
 #define memscpy(dst, dst_size, src, bytes_to_copy) (void) \
@@ -512,22 +546,14 @@ class BpAgmService : public ::android::BpInterface<IAgmService>
          int count = *size;
 
          data.writeInterfaceToken(IAgmService::getInterfaceDescriptor());
-         if (payload == NULL) {
-             data.writeInt64((long)payload);
-             data.writeUint32(count);
-             data.writeUint32(session_id);
-             data.writeUint32(aif_id);
-             remote()->transact(GET_TAG_MODULE_INFO, data, &reply);
-             *size = reply.readInt32();
-             return  reply.readInt32();
-         } else if (payload != NULL && count != 0) {
+         if (payload != NULL && count != 0) {
              android::Parcel::ReadableBlob tag_info_blob;
 
-             data.writeInt64((long)payload);
              data.writeUint32(count);
              data.writeUint32(session_id);
              data.writeUint32(aif_id);
              remote()->transact(GET_TAG_MODULE_INFO, data, &reply);
+             count = (size_t) reply.readUint32();
              reply.readBlob(count, &tag_info_blob);
              memcpy(payload, tag_info_blob.data(), count);
              tag_info_blob.release();
@@ -1166,11 +1192,27 @@ android::status_t BnAgmService::onTransact(uint32_t code,
         clbk_data_obj->client_data = (void *)data.readInt64();
         sp<IBinder> binder = data.readStrongBinder();
         clbk_data_obj->cb_binder = interface_cast<ICallback>(binder);
-        list_add_tail(&clbk_data_list, &clbk_data_obj->list);
-        pthread_mutex_unlock(&clbk_data_list_lock);
+        if (clbk_data_obj->cb_func != NULL) {
+            list_add_tail(&clbk_data_list, &clbk_data_obj->list);
+            rc = ipc_agm_session_register_cb(clbk_data_obj->session_id,
+                            &ipc_cb, evnt, clbk_data_obj->client_data);
+        } else {
+            clbk_data *clbk_data_obj_tmp = NULL;
+            struct listnode *node = NULL, *next = NULL;
+            list_for_each_safe(node, next, &clbk_data_list) {
+                clbk_data_obj_tmp = node_to_item(node, clbk_data, list);
+                if ((clbk_data_obj_tmp->session_id == clbk_data_obj->session_id) &&
+                    (clbk_data_obj_tmp->client_data == clbk_data_obj->client_data)) {
+                    list_remove(&clbk_data_obj_tmp->list);
+                    free(clbk_data_obj_tmp);
+                }
+            }
+            rc = ipc_agm_session_register_cb(clbk_data_obj->session_id,
+                            NULL, evnt, clbk_data_obj->client_data);
+            free(clbk_data_obj);
+        }
 
-        rc = ipc_agm_session_register_cb(clbk_data_obj->session_id,
-                        &ipc_cb, evnt, clbk_data_obj->client_data);
+        pthread_mutex_unlock(&clbk_data_list_lock);
         reply->writeInt32(rc);
         break ; }
 
@@ -1179,16 +1221,10 @@ android::status_t BnAgmService::onTransact(uint32_t code,
         size_t count = 0;
         void *bn_payload = NULL;
 
-        bn_payload = (void*)data.readInt64();
         count = (size_t) data.readUint32();
         pcm_idx = data.readUint32();
         be_idx = data.readUint32();
-        if (bn_payload == NULL) {
-            rc = ipc_agm_session_aif_get_tag_module_info(pcm_idx, be_idx, NULL,
-                                                                       &count);
-            reply->writeInt32(count);
-            reply->writeInt32(rc);
-        } else if (count != 0){
+        if (count != 0){
             bn_payload = calloc(count, sizeof(uint8_t));
             if (bn_payload == NULL) {
                 AGM_LOGE("calloc failed\n");
@@ -1197,6 +1233,7 @@ android::status_t BnAgmService::onTransact(uint32_t code,
             rc = ipc_agm_session_aif_get_tag_module_info(pcm_idx, be_idx,
                                                      bn_payload, &count);
             android::Parcel::WritableBlob tag_info_blob;
+            reply->writeUint32(count);
             reply->writeBlob(count, false, &tag_info_blob);
             memcpy(tag_info_blob.data(), bn_payload, count);
             tag_info_blob.release();
@@ -1329,6 +1366,11 @@ android::status_t BnAgmService::onTransact(uint32_t code,
         session_id = data.readUint32();
         audio_intf = data.readUint32();
         num_ckv = data.readUint32();
+        if (num_ckv > MAX_KVPAIR) {
+            AGM_LOGE("Num KVs %d more than expected: %d\n", num_ckv, MAX_KVPAIR);
+            rc = -EINVAL;
+            goto fail_ses_aud_set_cal_data;
+        }
         ckv_blob_size = num_ckv * (uint32_t)sizeof(struct agm_key_value);
         acc = (struct agm_cal_config *) calloc (1, sizeof(struct agm_cal_config)
                                                                + ckv_blob_size);
@@ -1404,9 +1446,9 @@ android::status_t BnAgmService::onTransact(uint32_t code,
 
     case SET_GAPLESS_SESSION_METADATA : {
         uint64_t handle = (uint64_t )data.readInt64();
-        uint32_t type = data.readUint32();
+        agm_gapless_silence_type type = (agm_gapless_silence_type) data.readUint32();
         uint32_t silence = data.readUint32();
-        rc = ipc_agm_set_gapless_session_metadata(handle, init_silence, trail_silence);
+        rc = ipc_agm_set_gapless_session_metadata(handle, type, silence);
         reply->writeInt32(rc);
         break; }
 
