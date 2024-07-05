@@ -42,7 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <tinyalsa/plugin.h>
+#include <tinyalsa/pcm_plugin.h>
 #include <snd-card-def.h>
 #include <tinyalsa/asoundlib.h>
 #include <agm/utils.h>
@@ -910,8 +910,24 @@ static int agm_pcm_ioctl(struct pcm_plugin *plugin, int cmd, ...)
     return ret;
 }
 
-int agm_pcm_open(struct pcm_plugin **plugin, unsigned int card,
-        unsigned int device, unsigned int mode)
+struct pcm_plugin_ops agm_pcm_ops = {
+    .close = agm_pcm_close,
+    .hw_params = agm_pcm_hw_params,
+    .sw_params = agm_pcm_sw_params,
+    .sync_ptr = agm_pcm_sync_ptr,
+    .writei_frames = agm_pcm_writei_frames,
+    .readi_frames = agm_pcm_readi_frames,
+    .ttstamp = agm_pcm_ttstamp,
+    .prepare = agm_pcm_prepare,
+    .start = agm_pcm_start,
+    .drop = agm_pcm_drop,
+    .mmap = agm_pcm_mmap,
+    .munmap = agm_pcm_munmap,
+    .poll = agm_pcm_poll,
+    .ioctl = agm_pcm_ioctl,
+};
+
+PCM_PLUGIN_OPEN_FN(agm_pcm_plugin)
 {
     struct pcm_plugin *agm_pcm_plugin;
     struct agm_pcm_priv *priv;
@@ -971,6 +987,7 @@ int agm_pcm_open(struct pcm_plugin **plugin, unsigned int card,
                               PCM_FORMAT_BIT(SNDRV_PCM_FORMAT_S32_LE));
 
     agm_pcm_plugin->card = card;
+    agm_pcm_plugin->ops = &agm_pcm_ops;
     agm_pcm_plugin->mode = mode;
     agm_pcm_plugin->constraints = &agm_pcm_constrs;
     agm_pcm_plugin->priv = priv;
@@ -1011,21 +1028,3 @@ err_plugin_free:
     else
        return -ret;
 }
-
-struct pcm_plugin_ops pcm_plugin_ops = {
-    .open = agm_pcm_open,
-    .close = agm_pcm_close,
-    .hw_params = agm_pcm_hw_params,
-    .sw_params = agm_pcm_sw_params,
-    .sync_ptr = agm_pcm_sync_ptr,
-    .writei_frames = agm_pcm_writei_frames,
-    .readi_frames = agm_pcm_readi_frames,
-    .ttstamp = agm_pcm_ttstamp,
-    .prepare = agm_pcm_prepare,
-    .start = agm_pcm_start,
-    .drop = agm_pcm_drop,
-    .mmap = agm_pcm_mmap,
-    .munmap = agm_pcm_munmap,
-    .poll = agm_pcm_poll,
-    .ioctl = agm_pcm_ioctl,
-};
