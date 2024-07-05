@@ -1723,7 +1723,8 @@ int session_dummy_rw_acdb_tunnel(
         return ret;
     }
 
-    ret = graph_rw_acdb_param(payload, is_param_set);
+    if (is_param_set)
+        ret = graph_set_acdb_param(payload);
 
     AGM_LOGD("exit status=%d", ret);
 
